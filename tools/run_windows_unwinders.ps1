@@ -5,7 +5,12 @@
 
     powershell -ExecutionPolicy Bypass -File tools\run_windows_unwinders.ps1
 
+  or, in an open PowerShell window (allows scripts for this window only):
+
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force; .\tools\run_windows_unwinders.ps1
+
   Takes about 1 hour. Needs no Visual Studio (see REQUIREMENTS).
+  Help: Get-Help .\tools\run_windows_unwinders.ps1 -Full
 
 .DESCRIPTION
   Combinations: 3 unwinders x 2 build configs = 6, each in its own build dir
@@ -70,6 +75,11 @@ param(
 )
 
 $ErrorActionPreference = "Continue"   # native tools write to stderr; exit codes decide
+# "powershell -File" passes "-Unwinders winapi,unwind" as ONE string; split lists either way
+$Unwinders = @($Unwinders | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+$Configs   = @($Configs   | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+foreach ($u in $Unwinders) { if ($u -notin @("dbghelp", "winapi", "unwind")) { Write-Host "ERROR: unknown unwinder '$u' (dbghelp, winapi, unwind)" -ForegroundColor Red; exit 1 } }
+foreach ($c in $Configs)   { if ($c -notin @("deb", "rel"))                  { Write-Host "ERROR: unknown config '$c' (deb, rel)" -ForegroundColor Red; exit 1 } }
 $Src = Split-Path -Parent $PSScriptRoot             # gdm_benchmarks
 if (-not $BuildRoot) { $BuildRoot = Split-Path -Parent $Src }
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
