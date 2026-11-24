@@ -1,0 +1,124 @@
+name: verify
+
+# Correctness of glutil's stack-frame skipping (gdm), no timing: shared runners make timings
+# meaningless, the benchmark is run by hand (tools/run_stacktrace_bench.py,
+# tools/run_windows_unwinders.ps1).
+#
+# Per toolchain x build config, for every optimization level:
+#   stacktrace_bench_<opt> --verify   the benchmark's copy of debug_stacktrace.cpp: new reaches
+#                                     the intended frame on every path (C1..C7b), equals old with
+#                                     the correct skip, internal frames <= K, cache path = plain
+#   stacktrace_verify_real_<opt>      gdm's REAL debug_stacktrace.cpp, black box (labels, logger
+#                                     output): intended frames, full depth, cache consistency
+# gdm is fetched (FetchGDM) at the head of GDM_TAG: master, or the tag given to a manual run.
+# A change in gdm does not start this workflow: run it by hand (Actions > verify > Run workflow).
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      gdm_tag:
+        description: "gdm branch, tag or commit to verify"
+        required: false
+        default: "master"
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: ${{ matrix.name }} ${{ matrix.config }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86-64: the only ABI here where glad's wrappers can tail-call the post
+          # callback (void GL functions with <= 2 arguments; see analysis.md 18.2)
+          - { name: linux-gcc,     os: ubuntu-latest,  config: Debug,          opts: "O0",          shell: bash }
+          - { name: linux-gcc,     os: ubuntu-latest,  config: RelWithDebInfo, opts: "O1;O2;O3;Os", shell: bash }
+          - { name: linux-clang,   os: ubuntu-latest,  config: Debug,          opts: "O0",          shell: bash, cc: clang, cxx: clang++ }
+          - { name: linux-clang,   os: ubuntu-latest,  config: RelWithDebInfo, opts: "O1;O2;O3;Os", shell: bash, cc: clang, cxx: clang++ }
+          - { name: macos-clang,   os: macos-latest,   config: Debug,          opts: "O0",          shell: bash }
+          - { name: macos-clang,   os: macos-latest,   config: RelWithDebInfo, opts: "O1;O2;O3;Os", shell: bash }
+          # MSVC: symbols from the PDB through dbghelp (MSVC has no Os apart from /O1)
+          - { name: windows-msvc,  os: windows-latest, config: Debug,          opts: "O0",          shell: bash }
+          - { name: windows-msvc,  os: windows-latest, config: RelWithDebInfo, opts: "O1;O2;O3",    shell: bash }
+          # MinGW GCC: DWARF through libdwarf (static callbacks are reported without namespace)
+          - { name: windows-mingw, os: windows-latest, config: Debug,          opts: "O0",          shell: "msys2 {0}" }
+          - { name: windows-mingw, os: windows-latest, config: RelWithDebInfo, opts: "O1;O2;O3;Os", shell: "msys2 {0}" }
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    env:
+      GDM_TAG: ${{ github.event.inputs.gdm_tag || 'master' }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # glfw (gdm::window, linked by the executables) builds its X11 and Wayland backends
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libxext-dev libwayland-dev libxkbcommon-dev
+
+      # Same resolution as gdm's CI: windows-latest may only carry VS2026 (needs CMake >= 4.1)
+      - name: resolve Visual Studio generator
+        if: matrix.name == 'windows-msvc'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $tools = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'
+          $vsVersion = & $vswhere -latest -products * -requires $tools -property installationVersion
+          if (-not $vsVersion) { throw "No Visual Studio with the VC++ x64 toolset found" }
+          $major = [int]($vsVersion.Split('.')[0])
+          $generator = @{ 16 = 'Visual Studio 16 2019'; 17 = 'Visual Studio 17 2022'; 18 = 'Visual Studio 18 2026' }[$major]
+          if (-not $generator) { throw "Unsupported Visual Studio major version $major ($vsVersion)" }
+          Write-Host "Visual Studio $vsVersion -> -G $generator"
+          "VS_GENERATOR=$generator" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # MinGW-w64 GCC (MINGW64, like a c:\mingw64 install); git for cpptrace's libdwarf clone,
+      # curl for gdm's glad generation
+      - uses: msys2/setup-msys2@v2
+        if: matrix.name == 'windows-mingw'
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git curl
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+
+      - name: configure
+        run: |
+          gen=()
+          case "${{ matrix.name }}" in
+            windows-msvc)  gen=(-G "$VS_GENERATOR" -A x64) ;;
+            windows-mingw) gen=(-G Ninja) ;;
+          esac
+          cc=()
+          if [ -n "${{ matrix.cc }}" ]; then cc=(-DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}); fi
+          cmake -S . -B build "${gen[@]}" "${cc[@]}" \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            "-DSTACKTRACE_BENCH_OPTS=${{ matrix.opts }}" \
+            "-DGDM_TAG=$GDM_TAG" 2>&1 | tee configure.log
+          test "${PIPESTATUS[0]}" -eq 0
+          # what was verified: gdm's commit, K values, cpptrace's back-ends
+          grep -E "GDM is up to date|GDM: (downloading|update)|stacktrace bench\] K:|Cpptrace auto config" configure.log || true
+          if [ -f external/gdm/GDM_COMMIT ]; then echo "gdm commit: $(cat external/gdm/GDM_COMMIT)"; fi
+
+      - name: build
+        run: |
+          targets=()
+          for o in $(echo "${{ matrix.opts }}" | tr ';' ' '); do
+            targets+=(stacktrace_bench_$o stacktrace_verify_real_$o)
+          done
+          cmake --build build --config ${{ matrix.config }} --parallel 4 --target "${targets[@]}"
+
+      - name: verify
+        run: ctest --test-dir build -C ${{ matrix.config }} -R "^stacktrace_" --output-on-failure

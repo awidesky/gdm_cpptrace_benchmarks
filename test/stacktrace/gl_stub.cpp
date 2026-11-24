@@ -9,6 +9,8 @@
 namespace stub {
 
 Injection g_inject;
+bool g_recordLabels = false;
+std::vector<std::string> g_labels;
 
 namespace {
 GLenum g_pendingError = GL_NO_ERROR;
@@ -35,7 +37,8 @@ void GLAD_API_PTR getProgramiv(GLuint, GLenum, GLint* v) { if (v) *v = 0; }
 GLuint GLAD_API_PTR createShader(GLenum) { return g_nextName++; }
 GLuint GLAD_API_PTR createProgram() { return g_nextName++; }
 GLboolean GLAD_API_PTR isTrue(GLuint) { return GL_TRUE; }
-void GLAD_API_PTR objectLabel(GLenum, GLuint, GLsizei, const GLchar*) {
+void GLAD_API_PTR objectLabel(GLenum, GLuint, GLsizei length, const GLchar* label) {
+    if (g_recordLabels && label) g_labels.emplace_back(label, length < 0 ? std::strlen(label) : static_cast<std::size_t>(length));
     if (g_inject.objectLabel) { g_inject.objectLabel = false; raise(GL_INVALID_VALUE); }
 }
 void GLAD_API_PTR getObjectLabel(GLenum, GLuint, GLsizei, GLsizei* length, GLchar* label) {

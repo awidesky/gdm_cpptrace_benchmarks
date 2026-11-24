@@ -36,6 +36,7 @@
 #endif
 
 #include "bench_control.hpp"
+#include "portable.hpp"
 
 namespace bench {
 Control& ctl() { static Control c; return c; }
@@ -271,7 +272,7 @@ void compareFrames(const cpptrace::stacktrace& o, const cpptrace::stacktrace& n,
 // --frames: cost of capturing n physical frames from inside the API (the same stack depth and
 // unwinder the old / new / cache paths use; nothing is resolved). Inlined into the API body so
 // the captured frames start at the API's own frame, like the real calls.
-inline __attribute__((always_inline)) void measureCapture(bench::VerifyRec& v) {
+BENCH_FORCEINLINE void measureCapture(bench::VerifyRec& v) {
     static constexpr int kDepths[] = {1, 2, 4, 5, 7, 16, 21};
     for (int n : kDepths) {
         std::vector<double> ts;

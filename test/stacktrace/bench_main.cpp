@@ -343,6 +343,9 @@ void warm(int rounds, int perRound, int warmup) {
 // resolves). Shows which of the frames new resolves in addition to old are expensive.
 bool frameCosts(const char* triggerName) {
     auto& c = bench::ctl();
+    // the triggers set old's skip for their case: without the table (another toolchain) it
+    // must be measured on the real stack first, as --verify does
+    if (!tableApplies()) measureSkips();
     // "C4" selects the first C4 site (C4-327); an exact name ("C4-407") selects that site
     const Trigger* sel = nullptr;
     for (const Trigger& t : kTriggers)

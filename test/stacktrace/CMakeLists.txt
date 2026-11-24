@@ -5,9 +5,31 @@
 # One executable per optimization level, all with -g. Everything else (definitions such as
 # GDM_DEBUG, include paths, glfw, glm, cpptrace) is taken from gdm's own targets.
 
-if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|RelWithDebInfo)$")
+get_property(_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(_multi_config)
+    # Visual Studio (and other multi-config) generators: the configuration is chosen at build
+    # time; build with --config Debug or --config RelWithDebInfo (gdm's debug code is compiled
+    # only there, through $<CONFIG:...> generator expressions).
+    message(STATUS "[stacktrace bench] multi-config generator: build with --config Debug or RelWithDebInfo")
+elseif(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|RelWithDebInfo)$")
     message(FATAL_ERROR "The stacktrace benchmark needs CMAKE_BUILD_TYPE Debug or RelWithDebInfo "
                         "(gdm compiles glutil's debug code only there), got '${CMAKE_BUILD_TYPE}'.")
+endif()
+
+if(MSVC)
+    # The per-level optimization below must be able to override the configuration's: /RTC
+    # (MSVC Debug default) refuses to combine with /O1 /O2 (D8016), so it is dropped for the
+    # benchmark executables (this directory only).
+    foreach(_v CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
+        string(REGEX REPLACE "/RTC[1csu]+" "" ${_v} "${${_v}}")
+    endforeach()
+    # GCC-style level -> MSVC: there is no O3 / Os; O3 = /O2 with the most aggressive inlining,
+    # Os = /O1 (MSVC's /O1 already means "minimize size").
+    set(_msvc_O0 /Od /Ob0)
+    set(_msvc_O1 /O1)
+    set(_msvc_O2 /O2)
+    set(_msvc_O3 /O2 /Ob3)
+    set(_msvc_Os /O1)
 endif()
 foreach(_t glutil gdm_glad_debug gdm::defs gdm::opengl gdm::window gdm::math cpptrace::cpptrace)
     if(NOT TARGET ${_t})
@@ -98,13 +120,52 @@ foreach(opt IN LISTS STACKTRACE_BENCH_OPTS)
         set(_ndebug -DNDEBUG)   # gdm RelWithDebInfo-like
     endif()
     # Appended after the CMAKE_<LANG>_FLAGS_<CONFIG> flags, so these win.
-    target_compile_options(${t} PRIVATE -${opt} -g ${_ndebug} -Wno-error -w)
+    if(MSVC)
+        if(NOT DEFINED _msvc_${opt})
+            message(FATAL_ERROR "no MSVC optimization flags for level '${opt}' (O0 O1 O2 O3 Os)")
+        endif()
+        # /Zi + /DEBUG: PDB (cpptrace reads file:line through dbghelp from it); /utf-8 as glutil;
+        # /bigobj for the large TUs (debug_callback.cpp, gl.c).
+        target_compile_options(${t} PRIVATE ${_msvc_${opt}} /Zi ${_ndebug} /w /utf-8 /bigobj)
+        target_link_options(${t} PRIVATE /DEBUG)
+    else()
+        target_compile_options(${t} PRIVATE -${opt} -g ${_ndebug} -Wno-error -w)
+    endif()
     if(MINGW)
         # Large TUs (debug_callback.cpp, gl.c) can exceed the default COFF section limit at -O0 -g.
         target_compile_options(${t} PRIVATE -Wa,-mbig-obj)
     endif()
     set_target_properties(${t} PROPERTIES CXX_STANDARD 17 CXX_EXTENSIONS ON)  # gdm: -std=gnu++17
+    # Same place for every generator (a multi-config one would add a <Config>\ subfolder),
+    # so the driver finds <build>/test/stacktrace/stacktrace_bench_<opt>[.exe]; PDB next to it.
+    set_target_properties(${t} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}>"
+        PDB_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}>")
 
     gdm_bench_copy_runtime_dlls(${t})
     add_test(NAME ${t}_verify COMMAND ${t} --verify)
+
+    # The same checks on gdm's REAL debug_stacktrace.cpp (black box: labels, logger output),
+    # so a change in gdm's own file is caught too (the benchmark above uses a copy of it).
+    set(r stacktrace_verify_real_${opt})
+    set(_real_sources ${_glutil_sources})
+    list(REMOVE_ITEM _real_sources ${CMAKE_CURRENT_SOURCE_DIR}/bench_stacktrace.cpp)
+    add_executable(${r} ${_real_sources} ${_glutil}/src/debug_stacktrace.cpp ${_glad_sources}
+                   gl_stub.cpp user_code.cpp verify_real.cpp)
+    get_target_property(_inc ${t} INCLUDE_DIRECTORIES)
+    get_target_property(_defs ${t} COMPILE_DEFINITIONS)
+    get_target_property(_opts ${t} COMPILE_OPTIONS)
+    get_target_property(_lopts ${t} LINK_OPTIONS)
+    target_include_directories(${r} PRIVATE ${_inc})
+    target_compile_definitions(${r} PRIVATE ${_defs})
+    target_compile_options(${r} PRIVATE ${_opts})
+    if(_lopts)
+        target_link_options(${r} PRIVATE ${_lopts})
+    endif()
+    target_link_libraries(${r} PRIVATE gdm::defs gdm::opengl gdm::window gdm::math cpptrace::cpptrace)
+    set_target_properties(${r} PROPERTIES CXX_STANDARD 17 CXX_EXTENSIONS ON
+        RUNTIME_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}>"
+        PDB_OUTPUT_DIRECTORY "$<1:${CMAKE_CURRENT_BINARY_DIR}>")
+    gdm_bench_copy_runtime_dlls(${r})
+    add_test(NAME ${r} COMMAND ${r})
 endforeach()

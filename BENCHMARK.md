@@ -69,17 +69,28 @@ ctest --test-dir build-st -R stacktrace                  # correctness gate only
 python3 tools/run_stacktrace_bench.py --build build-st   # writes results/stacktrace-<deb|rel>-<platform>-<time>/
 ```
 
-### Windows (MinGW): see analysis.md §11
+### CI (`.github/workflows/verify.yml`)
 
-Everything (3 cpptrace unwinders x Debug/RelWithDebInfo: verify, frame costs, benchmark), one
-command from the gdm_benchmarks folder; no Visual Studio needed (details: the script's help):
+Correctness only (no timings), on every push to master and by hand (Actions > verify > Run
+workflow, optionally with a gdm branch/tag/commit): Linux GCC and Clang, macOS Clang, Windows MSVC
+and MinGW, each in Debug (O0) and RelWithDebInfo (O1..Os). Per level it runs the benchmark's
+`--verify` and `stacktrace_verify_real_<opt>`, which checks gdm's real `debug_stacktrace.cpp`
+(black box: the labels glutil sets and the traces it logs). A change in gdm does not start it.
+
+### Windows (MSVC, MinGW): see analysis.md §11
+
+Everything with MSVC and MinGW GCC (cpptrace unwinders dbghelp / winapi / unwind(GCC only) x
+Debug / RelWithDebInfo: verify, frame costs, benchmark), one command from the gdm_benchmarks
+folder; a toolchain that is not installed is skipped (MinGW needs no Visual Studio):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\run_windows_unwinders.ps1
 ```
 
-Results: `results\windows-gcc<ver>-gdm_<local|master-sha>-<time>\<BuildType>_<levels>_unwind-<unwinder>\`,
-with `comparison.md` (all combinations side by side) in the top folder.
+Results: `results\windows-gdm_<local|master-sha>-<time>\<toolchain>_<BuildType>_<levels>_unwind-<unwinder>\`
+(e.g. `msvc-vs17.14_RelWithDebInfo_O1-O2-O3_unwind-dbghelp`), with `comparison.md` (all
+combinations side by side) in the top folder. MSVC levels: O0 `/Od`, O1 `/O1`, O2 `/O2`,
+O3 `/O2 /Ob3`. The harness builds with GCC, Clang and MSVC (`test/stacktrace/portable.hpp`).
 
 ```powershell
 cmake -S gdm_benchmarks -B "$env:USERPROFILE\Downloads\build_gdm_bench_dbg" -G "MinGW Makefiles" `

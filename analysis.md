@@ -895,6 +895,116 @@ getCalledGLfunctionName이 호출되는 횟수(라벨링 이벤트):
 
 ---
 
+## 17. Windows 두 번째 PC (pc07, GCC 16.1.0) 결과
+
+- 원본: `/Volumes/WHITE/result-oldversion/` (deb 5회, rel 5회, 2026-11-24 13:18~13:40, PowerShell 스크립트 이전 드라이버). §16은 다른 PC(`C:\Users\user`)의 결과.
+- 검증: 10회 모두 FAIL 0 (deb 16/16, rel 64/64, Os C6 `prefix(depth)`). GCC의 old skip 표는 §16과 완전히 같음.
+- 회차 간 편차: 대부분 ±1~2%.
+
+| 구성 | case | old | new | Δ | cache hit | 다른 PC(§16) old / new / hit |
+|---|---|---|---|---|---|---|
+| deb O0 | getCalled C4 | 103 | 312 | +209 (×3.0) | 29 | 175 / 347 / 105 |
+| deb O0 | getCalled C2 | 160 | 405 | +245 | 69 | 189 / 396 / 133 |
+| rel O2 | getCalled C4 | 47 | 144 | +97 (×3.1) | 36 | 133 / 220 / 110 |
+| rel O2 | getCalled C5 | 42 | 134 | +92 | 45 | 113 / 200 / 118 |
+| rel Os | getCalled C4 | 40 | 109 | +69 | 32 | 111 / 177 / 103 |
+| rel O2 | print C1 | 228 | 314 | +86 (×1.38) | – | 426 / 522 |
+| deb O0 | print C1 | 1165 | 1495 | +330 | – | 1177 / 1474 |
+| rel O2 | cold C4 (ms) | 65.6 | 92.9 | +27 | – | 63.3 / 90.4 |
+| deb O0 | cold C4 (ms) | 68.0 | 120.5 | +53 | – | 66.1 / 115.9 |
+
+- **캡처 비용이 PC마다 약 3배 다름**: 캐시 적중(=캡처만) 29~45µs vs 다른 PC 100~130µs. old도 같은 비율로 다름(47 vs 133).
+- **new − old(= 추가 resolve 비용)는 두 PC가 비슷함**(rel C4 +97 vs +87, O0 +209 vs +172). cold도 거의 같음.
+  → 차이는 언와인드(dbghelp `StackWalk64`) 쪽에서만 남. CPU·Windows/dbghelp 버전 차이로 추정되나 **두 PC의 사양은 미확인**.
+- 그래서 상대 증가는 이 PC에서 더 큼(getCalled ×2.4~3.1, 다른 PC ×1.6~2.1). 절대 증가는 같은 수준.
+- 캐시: 적중이 old보다 빠름(O2 C4 47→36, O0 103→29). C5 O2/Os는 여전히 약간 느림(42→45, 40→44): 캐시가 old보다 1프레임 더 캡처하기 때문(§16.2와 같은 현상).
+- 예제 영향(§13 방식, 이 PC 수치):
+
+| 예제 | 구성 | old | new | new+캐시 |
+|---|---|---|---|---|
+| 04_AIMLAB 시작 | rel O2 | 80ms | 137ms | 105ms |
+| 04_AIMLAB 시작 | deb O0 | 100ms | 217ms | 132ms |
+| Excavator STEP 6 프레임당 | rel O2 | 0.73ms (4.4%) | 1.80ms (10.8%) | 0.60ms (3.6%) |
+| Excavator STEP 6 프레임당 | deb O0 | 1.60ms (9.6%) | 4.05ms (24.3%) | 0.69ms (4.1%) |
+
+## 18. 콜백 내부 GL 에러(C6/C7)와 꼬리 호출 분석
+
+### 18.1 콜백 안에서 glutil 자신의 GL 호출이 실패할 수 있는가
+- 콜백의 GL 호출은 **사용자 호출이 `glGetError() == GL_NO_ERROR`일 때만** 실행됨(`fullPostCallback`: 에러면 라벨링·검사 없이 return).
+- glutil이 하는 호출과 실패 조건:
+  - `glGetShaderiv` / `glGetProgramiv` / `glGetAttachedShaders`(Compile/Link 직후): 방금 성공한 호출과 같은 이름 → 유효함.
+  - `glGetIntegerv(GL_CURRENT_PROGRAM)`(:526): GL 2.0+ 항상 유효.
+  - `labelGLobject`: KHR_debug 지원, 이름 ≠ 0, `glIs*`로 존재 확인, 라벨을 `GL_MAX_LABEL_LENGTH - 1`로 자름 → 정상 상태에서 실패 조건이 없음.
+- **그럼에도 C6/C7이 나는 경우** (정상 코드 경로에서는 사실상 다른 곳에서 생긴 에러):
+  1. **이미 세워져 있던 에러 플래그**: glad를 거치지 않는 GL 호출(자체 로더를 쓰는 ImGui OpenGL 백엔드, 다른 라이브러리, `glad_glXxx` 직접 호출)이 남긴 에러, 또는 구현이 여러 에러 플래그를 동시에 가진 경우. 첫 플래그는 사용자 호출의 post 콜백이 가져가고(이것도 오귀속), 남은 플래그를 glutil의 내부 호출이 가져감 → "in function glGetIntegerv".
+  2. 컨텍스트 손실(`GL_CONTEXT_LOST`, robustness)·`GL_OUT_OF_MEMORY`: 아무 호출에서나 날 수 있음.
+  3. 드라이버 버그.
+- 결론: **빈도는 매우 낮고, 나더라도 원인은 거의 항상 glutil의 그 호출이 아님.** 따라서 C7에서 glutil 위치(:526)를 보여 주는 (B)는 "glutil 버그"처럼 보이게 만들 수 있고, 사용자 줄을 보여 주는 (A)가 오히려 실마리가 됨.
+- 부수 발견: `fullPostCallback`의 에러 분기는 `errorCheck` 모드로 바꾸지 않고 `errorSnapshot`(GL 질의, Snapshot 캡처)을 실행함 → 그 안의 GL 호출은 `full` 모드 콜백(추적·라벨링·검사 포함)을 다시 거침. 기능상 문제는 확인되지 않았지만 의도인지 확인 필요.
+
+### 18.2 꼬리 호출이 일어날 수 있는가 (glad 래퍼 → post 콜백)
+- glad DEBUG 래퍼(void 함수)는 마지막 문장이 `_post_call_gl_callback(NULL, "glX", proc, N, args...)`(가변 인자, 전역 함수 포인터) → **꼬리 위치**. 값을 반환하는 함수는 `&ret`을 넘기므로 꼬리 호출 불가.
+- 같은 패턴을 clang -O2로 ABI별 교차 컴파일해 마지막 분기 명령을 확인함(GCC·MSVC 자체는 미확인, ABI 제약은 같음):
+
+| ABI | void, 인자 1~2 | void, 인자 3~4 | 값 반환 |
+|---|---|---|---|
+| Linux x86-64 (SysV) | **꼬리 호출** (`jmp *`) | call | call |
+| Linux AArch64 | **꼬리 호출** (`br`) | **꼬리 호출** | call |
+| macOS arm64 (Apple ABI) | call | call | call |
+| Windows x64 (MinGW, MSVC) | call | call | call |
+
+  - 이유: post 콜백 인자 = 고정 4개 + GL 인자 N개. 모두 레지스터에 들어가면(SysV 6개, AAPCS64 8개) 꼬리 호출 가능. Apple arm64는 가변 인자를 항상 스택으로, Win64는 레지스터 4개 + 스택이라 호출자 인자 영역이 모자라서 불가.
+  - 이것이 지금까지 측정한 mac / Windows에서 glad 프레임이 항상 있었던 이유. **Linux RelWithDebInfo는 미측정이며 래퍼 프레임이 빠질 수 있음**(`glBindTexture`, `glBindBuffer`, `glBindVertexArray`, `glCompileShader`, `glUseProgram`, `glGetIntegerv` 등 인자 2개 이하 void 함수).
+- 영향:
+  - **현재 new(A)**: 래퍼는 내부 프레임이므로 빠져도 결과가 같음(P가 줄어들 뿐, K 조건 유지).
+  - **old(하드코딩)**: 1프레임 덜 쌓이므로 skip 3이 사용자 프레임까지 건너뜀 → Linux O2에서 old는 호출자 줄을 보고했을 것(old의 숨은 버그, new에서 해결됨).
+  - **(B) "첫 glad 래퍼까지 스킵"**: 기준점이 사라짐. C7a에서는 안쪽 래퍼(glGetIntegerv, 인자 2)만 사라지고 바깥 래퍼(glDrawArrays, 인자 3)는 x86-64에서 남으므로, 단순 구현은 바깥 래퍼까지 건너뛰어 사용자 줄을 보고함 → 조용히 다른 결과. (B)를 하려면 "print + 보고하는 콜백 프레임 + (있으면) 보고 대상 함수의 래퍼"만 건너뛰는 식으로 정의해야 함.
+- glutil 내부 함수끼리의 꼬리 호출: 콜백·`labelGLobject`의 GL/헬퍼 호출 뒤에는 항상 소멸자나 다른 문장이 있어 꼬리 위치가 아님. 있더라도 내부 프레임만 줄어듦.
+- 사용자 코드의 꼬리 호출(§14.2-1)은 Windows에서도 가능: 사용자 함수의 마지막 문장이 GL 호출이면 함수 포인터로 `jmp` → 사용자 프레임이 빠지고 호출자 줄이 보고됨(old와 같은 한계).
+
+---
+
+## 19. Windows 언와인더 비교 (pc07, MinGW GCC 16.1.0, gdm master ecd6e15)
+
+- 원본: `/Volumes/WHITE/result-new/` (`tools/run_windows_unwinders.ps1`, 4회 × 6조합, 각 warm 7 / cold 15). 값은 4회 median(µs, cold는 ms).
+- 검증: 24조합 모두 OK(FAIL 0). GCC의 old skip 값은 언와인더와 무관하게 §16과 같음.
+- `--frames`는 이 실행에서 모두 실패함(`no old skip for C4`): 표가 없는 툴체인에서 skip 측정을 건너뛰던 하네스 버그. 수정함(`frameCosts`가 먼저 `measureSkips()`). 대신 **캐시 적중 = 캡처만 하는 경로**라서 캡처 비용은 그 값으로 읽을 수 있음.
+
+| unwinder | 구성 | getCalled C4 old | new | Δ | cache hit (≈캡처) | print C1 old → new | cold C4 old / new (ms) |
+|---|---|---|---|---|---|---|---|
+| dbghelp (기본) | O0 | 96 | 307 | +211 | 28.9 | 1070 → 1356 | 68 / 124 |
+| unwind (libgcc) | O0 | 69 | 273 | +204 | 2.1 | 1072 → 1374 | 52 / 110 |
+| winapi | O0 | 327* | 335 | (+8*) | 1.7 | 1274* → 1328 | 51 / 106 |
+| dbghelp | O2 | 49 | 147 | +98 | 36.4 | 238 → 321 | 68 / 97 |
+| unwind | O2 | **7.7** | 104 | +96 | **1.4** | 148 → 226 | 49 / 79 |
+| winapi | O2 | 40* | 116 | (+76*) | 1.2 | 202* → 244 | 50 / 80 |
+| dbghelp | Os | 43 | 115 | +72 | 32.8 | 241 → 319 | 65 / 89 |
+| unwind | Os | 8.2 | 75 | +67 | 1.4 | 153 → 221 | 47 / 71 |
+
+(\* winapi는 아래 cpptrace 버그로 old가 부풀려짐. O1/O3는 O2와 비슷함.)
+
+- **캡처 비용은 dbghelp(`StackWalk64`)가 원인임**: 캐시 적중이 dbghelp 29~36µs, unwind/winapi 1.0~2.1µs(약 20~30배). §17의 "PC마다 3배 다른 캡처 비용"도 dbghelp에서만 생기는 것으로 보임(이전 PC가 사양은 더 높음 → CPU가 아니라 dbghelp.dll/OS 쪽 차이로 추정, 미확인).
+- **new − old는 언와인더와 무관하게 같음**(O2 +96~98µs, O0 +204~211µs): 추가 resolve(DWARF, libdwarf) 비용이므로 당연함. unwind에서는 old가 7.7µs로 mac(12µs)과 비슷해져서, **Windows에서의 상대 증가가 커 보였던 것은 기본 언와인더의 캡처 비용이 old를 부풀렸기 때문**임.
+- cold는 unwind/winapi가 dbghelp보다 약 15~20ms 빠름(첫 `StackWalk64`의 초기화 비용으로 보임).
+- unwind 기준 예제 영향(O2): AIMLAB 시작 old 52ms → new 111ms → 캐시 80ms. Excavator STEP 6 프레임당 old 0.19ms(1.1%) → new 1.17ms(7.0%) → 캐시 0.03ms(0.2%).
+
+### 19.1 cpptrace 1.0.4 winapi 언와인더 버그
+- `src/unwind/unwind_with_winapi.cpp`의 `capture_frames(skip, max_depth)`:
+  ```cpp
+  std::vector<void*> addrs(skip + std::min(hard_max_frames, max_depth), nullptr);
+  CaptureStackBackTrace(static_cast<ULONG>(skip + 1), static_cast<ULONG>(addrs.size()), addrs.data(), NULL);
+  ```
+  skip은 `FramesToSkip`으로 이미 건너뛰는데, 배열 크기(= `FramesToCapture`)에도 skip을 더함 → **max_depth보다 skip(+cpptrace 내부 skip)개 더 캡처**함. dbghelp 경로는 `while (trace.size() < max_depth)`로 정확함.
+- 실측과 일치: old getCalled `current(3, 1)` → 6프레임, old print `current(3, 15)` → 20프레임, new `current(0, 21)` → 23프레임(내부 skip 약 2).
+- 영향: skip이 큰 old가 더 많이 resolve함(위 표의 \*), 그리고 `printStackTrace(depth)`가 depth보다 많이 출력함(그래서 winapi의 print 경로 전부가 `prefix(depth)`). gdm의 new는 skip=0이라 +2프레임만 영향을 받고, 출력은 `keepCallerFrames`가 depth로 자르므로 정확함.
+- 수정은 `addrs(std::min(hard_max_frames, max_depth))`. 업스트림에 보고할 가치가 있음.
+
+### 19.2 gdm에 대한 함의
+- MinGW: `CPPTRACE_UNWIND_WITH_UNWIND`(libgcc)가 가장 빠르고, 이 측정의 모든 레벨에서 검증을 통과함. glutil이 cpptrace를 fetch할 때 MinGW에서 이것을 기본으로 두면(사용자가 지정하지 않은 경우) Windows의 old/new/캐시 비용이 모두 mac 수준에 가까워짐.
+- MSVC: libgcc 언와인더가 없으므로 dbghelp 또는 winapi. winapi는 위 버그가 있어도 new 경로에서는 dbghelp보다 빠름(O2 116 vs 147, 캐시 1.2 vs 36). MSVC 실측 필요.
+
+---
+
 ## 12. 부록: 측정 기록 전체 (시간순)
 
 본문 표는 대표 레벨(O0, O2)만 발췌했음. 아래는 모든 측정의 전체 기록이고, 표는 각 결과 폴더의 `summary.md`에서 그대로 옮긴 것임.
