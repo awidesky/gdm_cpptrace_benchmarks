@@ -1,0 +1,11 @@
+#ifndef BENCHMARKS_CONFIG_HPP
+#define BENCHMARKS_CONFIG_HPP
+
+#include <filesystem>
+
+namespace benchmarks {
+inline const std::filesystem::path TEST_ASSET_DIR = "@TEST_ASSET_DIR@";
+inline const std::filesystem::path PROJECT_ROOT = "@CMAKE_SOURCE_DIR@";
+} // namespace benchmarks
+
+#endif // BENCHMARKS_CONFIG_HPP
