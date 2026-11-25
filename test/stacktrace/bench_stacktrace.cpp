@@ -54,8 +54,9 @@ inline double ns(clk::time_point a, clk::time_point b) {
 // ---- verbatim from gdm debug_stacktrace.cpp (color helpers) -----------------------
 constexpr const char* kForce   = "FORCE_COLOR";
 constexpr const char* kNoColor = "NO_COLOR";
+// _dupenv_s only with MSVC: msvcrt.dll-based MinGW runtimes (MSYS2 MINGW64) do not export it
 const char* safe_getenv(const char* name) {
-#ifdef _WIN32
+#ifdef _MSC_VER
     size_t len = 0;
     char* buf = nullptr;
     if (_dupenv_s(&buf, &len, name) == 0 && buf) {

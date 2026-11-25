@@ -170,7 +170,10 @@ def main():
             if not os.path.exists(exe):
                 sys.exit(f"missing {exe} (build it first)")
             vouts[opt] = run([exe, "--verify"], log_dir=out)
-            verify_lines += [l for l in vouts[opt] if l.startswith("[") or l.startswith("S\t")]
+            verify_lines += [l for l in vouts[opt] if l.startswith("[") or l.startswith("S\t") or l.startswith("N\t")]
+            for l in vouts[opt]:
+                if l.startswith("N\t"):  # a case whose sites need different old skips
+                    print(f"note: {opt} {l.split(chr(9), 2)[2]}", file=sys.stderr)
             print(f"verify {opt} OK", file=sys.stderr)
         save()
         print(f"RESULTS_DIR={out}")  # for scripts that run this driver

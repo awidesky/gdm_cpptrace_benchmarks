@@ -122,3 +122,19 @@ jobs:
 
       - name: verify
         run: ctest --test-dir build -C ${{ matrix.config }} -R "^stacktrace_" --output-on-failure
+
+      # What was found, also when every test passed (ctest only shows output on failure):
+      # old's correct skips on this toolchain ("S"), cases with no single correct old skip ("N")
+      - name: report
+        if: always()
+        run: |
+          for exe in build/test/stacktrace/stacktrace_bench_O*; do
+            case "$exe" in *.pdb|*.ilk) continue ;; esac
+            [ -x "$exe" ] || continue
+            "$exe" --verify 2>/dev/null | grep -E "^(S|N)	| FAIL" || true
+          done
+          for exe in build/test/stacktrace/stacktrace_verify_real_O*; do
+            case "$exe" in *.pdb|*.ilk) continue ;; esac
+            [ -x "$exe" ] || continue
+            "$exe" 2>/dev/null | tail -1 || true
+          done

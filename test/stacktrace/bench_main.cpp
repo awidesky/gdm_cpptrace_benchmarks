@@ -85,14 +85,17 @@ bool tableApplies() {  // BENCH_FORCE_MEASURED=1 exercises the other-toolchain p
     return !forced && !std::strcmp(BENCH_TOOLCHAIN, kOldSkipTableToolchain);
 }
 
-std::map<std::string, int> g_measuredSkip;  // case -> skip measured by the verify pass
+// "<trigger>:<case>" -> skip measured by the verify pass. Per trigger, not per case: on some
+// ABIs (Linux x86-64 / AArch64) glad's wrapper tail-calls the post callback for some GL
+// functions only, so the sites of one case (C4) need different skips.
+std::map<std::string, int> g_measuredSkip;
 bool g_measuring = false;                   // verify pass 1: skips not known yet
 
 void loadSkipsFromEnv() {  // --cold runs get the measured skips from the driver
     static bool done = false;
     if (done) return;
     done = true;
-    const char* e = std::getenv("BENCH_OLD_SKIPS");  // "C1=3,C2=3,..."
+    const char* e = std::getenv("BENCH_OLD_SKIPS");  // "C1:C1=3,C4-327:C4=4,..."
     if (!e) return;
     std::string s = e;
     std::size_t pos = 0;
@@ -106,7 +109,7 @@ void loadSkipsFromEnv() {  // --cold runs get the measured skips from the driver
     }
 }
 
-int oldSkip(const char* caseId) {
+int oldSkip(const char* triggerName, const char* caseId) {
     if (tableApplies()) {
         for (const SkipRow& r : kOldSkip)
             if (!std::strcmp(r.opt, BENCH_OPT) && !std::strcmp(r.caseId, caseId)) return r.skip;
@@ -114,11 +117,12 @@ int oldSkip(const char* caseId) {
             if (!std::strcmp(r.opt, "*") && !std::strcmp(r.caseId, caseId)) return r.skip;
     } else {
         loadSkipsFromEnv();
-        if (auto it = g_measuredSkip.find(caseId); it != g_measuredSkip.end()) return it->second;
+        const std::string key = std::string(triggerName) + ":" + caseId;
+        if (auto it = g_measuredSkip.find(key); it != g_measuredSkip.end()) return it->second;
     }
     if (g_measuring) return 0;  // placeholder; pass 1 only measures the stack shape
-    std::fprintf(stderr, "no old skip for %s (toolchain %s: run --verify first, or set BENCH_OLD_SKIPS)\n",
-                 caseId, BENCH_TOOLCHAIN);
+    std::fprintf(stderr, "no old skip for %s:%s (toolchain %s: run --verify first, or set BENCH_OLD_SKIPS)\n",
+                 triggerName, caseId, BENCH_TOOLCHAIN);
     std::exit(3);
 }
 
@@ -183,9 +187,9 @@ void runTrigger(const Trigger& t, const Variant& v) {
     c.kGetCalled = v.kGetCalled ? v.kGetCalled : GDM_K_GETCALLED;
     c.kPrint = v.kPrint ? v.kPrint : GDM_K_PRINT;
     c.cacheMode = v.cacheMode;
-    c.oldSkipPrint = t.printCase ? oldSkip(t.printCase) : 3;
+    c.oldSkipPrint = t.printCase ? oldSkip(t.name, t.printCase) : 3;
     const char* gc = t.getCalledCase ? t.getCalledCase : t.sideGetCalled;
-    c.oldSkipGetCalled = gc ? oldSkip(gc) : 4;
+    c.oldSkipGetCalled = gc ? oldSkip(t.name, gc) : 4;
     glutil::debug::setGladDebugCallbacks(t.mode);
     const bool rec = c.record;
     c.record = false;
@@ -218,15 +222,34 @@ void measureSkips() {
         c.verifies.clear();
         runTrigger(t, kVariants[1]);
         c.verify = false;
-        for (const auto& v : c.verifies)
-            if (keptApi(t, v.api) && v.aligned && !g_measuredSkip.count(caseOf(t, v.api)))
-                g_measuredSkip[caseOf(t, v.api)] = v.derivedOldSkip;
+        for (const auto& v : c.verifies) {
+            // the measured API, and the side getCalled of the nested cases (C6/C7: old needs a
+            // skip for it too; same real stack)
+            const char* cs = keptApi(t, v.api) ? caseOf(t, v.api)
+                           : (v.api == Api::GetCalled ? t.sideGetCalled : nullptr);
+            if (!cs || !v.aligned) continue;
+            const std::string key = std::string(t.name) + ":" + cs;
+            if (!g_measuredSkip.count(key)) g_measuredSkip[key] = v.derivedOldSkip;
+        }
     }
     g_measuring = false;
     g_shapes.clear();
     std::printf("S\t%s\t%s\t%s", BENCH_OPT, BENCH_TOOLCHAIN, tableApplies() ? "table" : "measured");
     for (auto& [k, v] : g_measuredSkip) std::printf("\t%s=%d", k.c_str(), v);
     std::printf("\n");
+    // A case whose sites need different skips: old's ONE hardcoded value per call site in
+    // glutil cannot be right for all of them on this toolchain (new needs no value).
+    std::map<std::string, std::map<int, std::string>> byCase;  // case -> skip -> triggers
+    for (const Trigger& t : kTriggers)
+        for (const char* cs : {t.printCase, t.getCalledCase})
+            if (cs) if (auto it = g_measuredSkip.find(std::string(t.name) + ":" + cs); it != g_measuredSkip.end())
+                byCase[cs][it->second] += std::string(byCase[cs][it->second].empty() ? "" : " ") + t.name;
+    for (auto& [cs, vals] : byCase) {
+        if (vals.size() < 2) continue;
+        std::printf("N\t%s\t%s: no single correct old skip on this stack:", BENCH_OPT, cs.c_str());
+        for (auto& [skip, trig] : vals) std::printf(" %d (%s);", skip, trig.c_str());
+        std::printf("\n");
+    }
 }
 
 bool verifyAll(bool verbose) {
@@ -243,7 +266,7 @@ bool verifyAll(bool verbose) {
             if (!keptApi(t, v.api)) continue;
             ++checked;
             const char* caseId = caseOf(t, v.api);
-            const int table = oldSkip(caseId);
+            const int table = oldSkip(t.name, caseId);
             const std::string expect = t.expectLabelGLobject
                 ? std::string("glutil::debug::labelGLobject")
                 : "user_code.cpp:" + std::to_string(user::g_siteLine[t.siteId]);
