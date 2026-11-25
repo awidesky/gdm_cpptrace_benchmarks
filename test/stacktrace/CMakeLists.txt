@@ -20,16 +20,25 @@ if(MSVC)
     # The per-level optimization below must be able to override the configuration's: /RTC
     # (MSVC Debug default) refuses to combine with /O1 /O2 (D8016), so it is dropped for the
     # benchmark executables (this directory only).
-    foreach(_v CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
+    # The configuration's /O and /Ob are dropped too, so each level below is exactly its flags:
+    # RelWithDebInfo's "/O2 /Ob1" reached cl next to every level's own /O1 /O2 (CI: D9025
+    # "overriding '/Ob1' with '/Ob3'" at O3), so which inlining O1/O2 really had depended on
+    # the generator (Visual Studio: separate Optimization / InlineFunctionExpansion
+    # properties) and on cl's override order.
+    foreach(_v CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG CMAKE_C_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_RELWITHDEBINFO)
         string(REGEX REPLACE "/RTC[1csu]+" "" ${_v} "${${_v}}")
+        string(REGEX REPLACE "/O[12d]( |$)" "\\1" ${_v} "${${_v}}")
+        string(REGEX REPLACE "/Ob[0-3]" "" ${_v} "${${_v}}")
     endforeach()
-    # GCC-style level -> MSVC: there is no O3 / Os; O3 = /O2 with the most aggressive inlining,
-    # Os = /O1 (MSVC's /O1 already means "minimize size").
+    # GCC-style level -> MSVC (no O3 / Os there), as CMake's own MSVC configurations:
+    #   O0 = Debug, O1 = MinSizeRel, O2 = RelWithDebInfo (what a gdm user's debug code gets),
+    #   O3 = /O2 with the most aggressive inlining, Os = O1 (/O1 already minimizes size).
+    # /Ob1 (only inline-marked functions) is CMake's default for RelWithDebInfo and MinSizeRel.
     set(_msvc_O0 /Od /Ob0)
-    set(_msvc_O1 /O1)
-    set(_msvc_O2 /O2)
+    set(_msvc_O1 /O1 /Ob1)
+    set(_msvc_O2 /O2 /Ob1)
     set(_msvc_O3 /O2 /Ob3)
-    set(_msvc_Os /O1)
+    set(_msvc_Os /O1 /Ob1)
 endif()
 foreach(_t glutil gdm_glad_debug gdm::defs gdm::opengl gdm::window gdm::math cpptrace::cpptrace)
     if(NOT TARGET ${_t})

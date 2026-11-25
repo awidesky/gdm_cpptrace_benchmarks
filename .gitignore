@@ -291,3 +291,4 @@ pyrightconfig.json
 build*/
 results*/
 external/*
+logs/

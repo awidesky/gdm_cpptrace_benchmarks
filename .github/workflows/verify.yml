@@ -84,11 +84,13 @@ jobs:
           "VS_GENERATOR=$generator" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       # MinGW-w64 GCC (MINGW64, like a c:\mingw64 install); git for cpptrace's libdwarf clone,
-      # curl for gdm's glad generation
+      # curl for gdm's glad generation. MINGW64 (msvcrt.dll) on purpose, although MSYS2
+      # deprecates it for UCRT64: msvcrt lacks functions UCRT has (it caught gdm's _dupenv_s).
       - uses: msys2/setup-msys2@v2
         if: matrix.name == 'windows-mingw'
         with:
           msystem: MINGW64
+          suppress-deprecation-warnings: msystem-mingw64
           update: true
           install: >-
             git curl
@@ -111,6 +113,9 @@ jobs:
           # what was verified: gdm's commit, K values, cpptrace's back-ends
           grep -E "GDM is up to date|GDM: (downloading|update)|stacktrace bench\] K:|Cpptrace auto config" configure.log || true
           if [ -f external/gdm/GDM_COMMIT ]; then echo "gdm commit: $(cat external/gdm/GDM_COMMIT)"; fi
+          # the unwinder cpptrace is really compiled with (its define)
+          uw=$(grep -rhoE "CPPTRACE_UNWIND_WITH_[A-Z]+" build --include=build.ninja --include=flags.make --include="*.vcxproj" 2>/dev/null | sort -u | tr '\n' ' ')
+          echo "cpptrace unwinder: ${uw:-? (installed cpptrace, built with its own)}"
 
       - name: build
         run: |
