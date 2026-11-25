@@ -1005,6 +1005,125 @@ getCalledGLfunctionName이 호출되는 횟수(라벨링 이벤트):
 
 ---
 
+## 20. CI 첫 실행 결과 (`logs/`, 커밋 b200399, gdm master ecd6e15)
+
+| 작업 | 결과 | 원인 |
+|---|---|---|
+| macOS Debug / Rel | 통과 (2 / 8) | |
+| **Windows MSVC Debug / Rel** | **통과 (2 / 6)** | VS 2026, MSVC 19.52, cpptrace: unwinding·symbols·demangling 모두 dbghelp. MSVC에서 new와 실제 코드 검증이 모두 맞음 |
+| Linux GCC / Clang Debug | 통과 (2) | |
+| Linux GCC / Clang Rel | 벤치 `--verify` 실패 (GCC 3, Clang 4), `verify_real`은 통과 | 하네스: old skip을 케이스당 1개로 측정함(아래) |
+| Windows MinGW Debug / Rel | 링크 실패 | **B9**: `_dupenv_s` (아래) |
+
+- **Linux x86-64에서 glad 래퍼의 꼬리 호출이 실제로 일어남**(§18.2의 예측대로):
+  - GCC O2의 측정 skip: C1 = C2 = C3 = **2**(다른 플랫폼은 3), C7a = 4.
+  - C4 안에서도 GL 함수에 따라 다름: 값을 반환하는 CreateShader/CreateProgram(:327/:332)은 4, 인자 1~2개 void 함수(CompileShader, GenBuffers, Bind*)는 3. Os에서는 3 / 2.
+  - **new는 모든 경로에서 의도한 프레임에 도달함**(`target ok`, 실제 코드 검증 통과).
+  - **old는 이 플랫폼에서 하나의 하드코딩 값으로는 맞을 수 없음**: glutil의 호출 지점 하나(autoLabel)가 사용자 GL 함수에 따라 3 또는 4를 필요로 함. new가 이 문제를 없앤 것이 실측으로 확인됨.
+- 하네스 수정: old skip을 **트리거(호출 지점)마다** 측정·조회(`"<trigger>:<case>"`). 한 케이스의 사이트끼리 값이 다르면 `N` 줄("no single correct old skip on this stack")로 기록하고, 드라이버는 이를 결과와 stderr에 남김. AppleClang 표는 그대로(사이트 간 차이 없음).
+- **B9 (gdm 실제 버그)**: `safe_getenv`가 `#ifdef _WIN32`에서 `_dupenv_s`를 씀. MSYS2 MINGW64처럼 msvcrt.dll 기반 MinGW 런타임에는 이 함수가 없어서 링크 실패(`undefined reference to __imp__dupenv_s`). UCRT 기반 MinGW(사용자 PC의 c:\mingw64로 추정)와 MSVC에서는 문제없음. `#ifdef _MSC_VER`로 바꿈(gdm 작업 트리 + 하네스 사본, 커밋 안 함). **CI의 MinGW 작업은 이 수정이 gdm master에 들어가야 통과함**(CI는 gdm master를 fetch함).
+- CI에 `report` 단계 추가: 통과해도 플랫폼별 `S`(old의 정답 skip)와 `N` 줄, 실제 코드 검증 요약을 출력.
+
+## 21. MinGW에서 `CPPTRACE_UNWIND_WITH_UNWIND`를 기본으로 쓰는 경우
+
+### 21.1 cpptrace가 왜 dbghelp를 고르는가
+- `cmake/Autoconfig.cmake`: 플랫폼으로 분기함. `UNIX`이면 `_Unwind`(있으면), **`MINGW OR WIN32`이면 `StackWalk64`(있으면) → 없으면 winapi**. MinGW는 `UNIX` 분기에 해당하지 않으므로 `HAS_UNWIND` 검사를 하고도 쓰지 않음.
+- README의 표도 MinGW 기본값을 `StackWalk64`로 적지만, 같은 문서가 libgcc unwind를 "currently produces the most accurate stack traces on gcc/clang/mingw"라고 설명함.
+- 선택 이유는 문서에 없음. 추정되는 이유(미확인):
+  - Windows의 "기본" 메커니즘이고 MSVC 빌드와 같은 백엔드를 씀(MinGW 심볼도 dbghelp를 보조로 씀).
+  - 32-bit x86: 테이블 기반 언와인드가 없음. `StackWalk64`는 FPO·프레임 포인터로 MSVC로 컴파일된 프레임(시스템 DLL, 드라이버 콜백)까지 걸을 수 있지만, 32-bit MinGW의 libgcc(dw2/sjlj)는 DWARF CFI가 없는 프레임에서 멈춤.
+  - unwind 정보가 없는 코드(JIT 등): `StackWalk64`는 함수 테이블 콜백과 휴리스틱으로 대응함.
+
+### 21.2 장점 (실측, pc07 MinGW GCC 16.1, §19)
+- 캡처 비용: O2 36µs → 1.4µs(약 25배), O0 29µs → 2.1µs. old·new·캐시 모두에 적용되고, 캐시 적중이 사실상 0이 됨(1.4µs).
+- 첫 호출(cold) 약 15~20ms 단축.
+- PC마다 3배 달랐던 캡처 비용(§17)이 dbghelp에서만 생기므로, 환경 차이에도 덜 흔들릴 것으로 보임(미확인).
+- 정확성: 4회 × 모든 레벨에서 검증 통과(old/new 비교, 의도한 프레임). `_Unwind_GetIPInfo`로 PC 보정을 프레임별로 판단함(dbghelp/winapi는 항상 -1).
+- 동시성: dbghelp 경로는 전역 lock(`get_dbghelp_lock`)으로 직렬화되지만, `_Unwind_Backtrace`는 lock 없이 캡처함(심볼 resolve는 여전히 직렬화됨).
+- 새 의존성 없음: libgcc(`libgcc_s_seh-1.dll` 또는 정적 libgcc_eh)는 C++ 예외 때문에 이미 링크됨.
+
+### 21.3 단점·위험
+1. **cpptrace를 gdm이 직접 빌드할 때만 적용됨**: 설치된 cpptrace(MSYS2 `mingw-w64-*-cpptrace`, vcpkg 등)는 이미 컴파일된 백엔드를 씀 → 같은 gdm이라도 cpptrace를 어디서 받았는지에 따라 동작이 달라짐.
+2. **업스트림 기본값과 다름**: cpptrace가 MinGW에서 주로 검증하는 조합은 `StackWalk64`일 가능성이 높음. 다만 README가 가장 정확하다고 설명하고, 이 측정에서도 문제가 없었음.
+3. **32-bit MinGW(i686)**: CFI가 없는 프레임(시스템 DLL, MSVC 라이브러리)에서 trace가 끊길 수 있음. glutil이 필요로 하는 프레임(사용자 → glad → 콜백)은 모두 MinGW 코드라 skip 판정에는 영향이 없지만, 그 아래 사용자 스택(예: 윈도우 메시지 콜백을 거친 경로)이 잘릴 수 있음. x64는 모든 모듈에 `.pdata`가 있어서 해당 없음.
+4. **unwind 정보가 없는 프레임**(JIT, 손으로 쓴 어셈블리): `StackWalk64`보다 일찍 멈출 수 있음. gdm 사용 형태에서는 드묾.
+5. **llvm-mingw**(clang + LLVM libunwind): `_Unwind_Backtrace`는 LLVM libunwind가 제공함. 미측정.
+
+### 21.4 결정: gdm에 적용하지 않음 (기록만)
+특정 아키텍처(x64)와 특정 컴파일러(MinGW GCC)에서만 동작하는 검사를 gdm에 넣기에는, MinGW의 사용 비중에 비해 유지 비용이 크다. 그래서 gdm은 cpptrace의 자동 선택을 그대로 따른다. MinGW에서는 dbghelp이다. MinGW 사용자가 더 빠른 캡처를 원하면 configure 때 직접 `-DCPPTRACE_UNWIND_WITH_UNWIND=ON`을 주면 된다. 단, gdm이 cpptrace를 직접 빌드하는 경우에만 해당한다.
+
+검토했던 구현은 다음과 같다. 나중에 다시 검토할 때를 위해 남긴다.
+- 조건: MinGW + x64 + GCC이고, cpptrace의 `CPPTRACE_UNWIND_WITH_*` 중 ON이 하나도 없으며, opt-out 옵션(예: `GLUTIL_CPPTRACE_MINGW_UNWIND`)이 ON이다. 그러면 glutil이 `gdm_use_or_fetch_package(cpptrace)`를 부르기 전에 `CPPTRACE_UNWIND_WITH_UNWIND`를 일반 변수 ON으로 둔다. cpptrace는 `cmake_minimum_required(3.15)`이므로 CMP0077이 NEW이고, `option()`이 이 일반 변수를 그대로 쓰며 cache에는 남기지 않는다.
+- 함정: cpptrace는 `if(NOT WIN32)`일 때만 `HAS_UNWIND`를 검사한다. 그래서 그냥 ON으로 두면 configure할 때마다 `CPPTRACE_UNWIND_WITH_UNWIND specified but libgcc unwind doesn't seem to be available` 경고가 뜬다. cpptrace와 같은 검사(`cmake/has_unwind.cpp`)를 `check_cxx_source_compiles(... HAS_UNWIND)`로 먼저 돌려 cache에 넣어야 한다. 검사가 실패하면 기본값을 적용하지 않는다.
+- "사용자가 지정했는가"는 `DEFINED`로 판단할 수 없다. 첫 configure 뒤에는 cpptrace의 `option()`이 나머지 백엔드를 OFF로 cache에 넣기 때문이다. ON인 백엔드가 있는지로 판단해야 한다.
+- 설치된 cpptrace(`find_package`)에는 적용되지 않는다. 같은 gdm이라도 cpptrace를 어디서 받았는지에 따라 백엔드가 달라진다.
+- mac에서 MinGW 조건만 흉내 내고 실제 cpptrace 1.0.4로 확인했다. 기본 → UNWIND(경고 없음, cache에 남는 값 없음), 재configure → 같음, 사용자가 EXECINFO=ON → EXECINFO, opt-out → cpptrace 자동 선택, 다시 ON → UNWIND. `cpptrace-lib` 빌드도 성공했다. 실제 MinGW에서는 확인하지 않았고, gdm 변경은 되돌렸다.
+- MSVC에는 libgcc 언와인더가 없다. winapi는 §19.1 버그가 고쳐질 때까지 후보가 아니다.
+
+## 22. CI 두 번째 실행 (`logs/`, 커밋 3cacc03, gdm master e6281db)
+
+**10/10 작업 통과**: ctest 48/48, `verify_real` 24회(작업×레벨) × 34 검사 전부 OK. 모든 작업이 gdm e6281db(B9 수정 포함)를 fetch했고 K는 getCalled=4, print=6이다.
+
+| 작업 | 언와인더 / 심볼 | old 정답 skip (S 줄) | N 줄 |
+|---|---|---|---|
+| linux-gcc Debug O0 | libgcc unwind / libdwarf | 기본(C1=3, C4=4, C5=4, C7a=6) | — |
+| linux-gcc Rel O1 | 〃 | 기본 | — |
+| linux-gcc Rel O2 O3 | 〃 | C1=C2=C3=2, C4: 327·332=4 / 나머지=3 | C4 |
+| linux-gcc Rel Os | 〃 | C1=2, C4: 327·332=3 / 나머지=2 | C4 |
+| linux-clang Debug O0 | 〃 | 기본 | — |
+| linux-clang Rel O1–Os | 〃 | C1=2, C4: 4 / 3 | C4 (전 레벨) |
+| macos-clang Debug / Rel | execinfo / libdwarf | 표와 일치(O1↑ C5=3, C7a=5) | — |
+| windows-msvc Debug / Rel | dbghelp / dbghelp | 기본(O1–O3 모두) | — |
+| windows-mingw Debug O0 | dbghelp / libdwarf+dbghelp | 기본 | — |
+| windows-mingw Rel O1 O3 | 〃 | 기본 | — |
+| windows-mingw Rel O2 | 〃 | C5=3, C7a=5 | — |
+| windows-mingw Rel Os | 〃 | C4=3(전 사이트), C5=3, C7a=5, C7b=5 | — |
+
+### 22.1 §18.2의 꼬리 호출 조건이 데이터와 정확히 맞는다
+glad의 post 콜백은 고정 인자 4개(`ret, name, apiproc, len_args`)에 GL 인자를 가변 인자로 붙여 받는다. SysV x86-64에서 정수 인자를 넘기는 레지스터는 6개이므로, **GL 인자가 2개 이하일 때만 스택 인자 없이 sibcall할 수 있다.**
+- 꼬리 호출됨(skip −1): `glBindTexture`(2), `glCompileShader`(1), `glBindBuffer`(2), `glBindVertexArray`(1), C7a 내부의 `glGetIntegerv`(2). C7a:C7a가 C5+1이 됐다(보통은 C5+2).
+- 꼬리 호출 안 됨:
+  - `glGetShaderiv`(인자 3개): C7b:C7b가 C4+2를 유지했다.
+  - 값을 반환하는 `glCreateShader`·`glCreateProgram`: `&ret`이 탈출하므로 sibcall할 수 없고, C4-327·332는 4를 유지했다.
+- **GCC O1은 꼬리 호출이 없다.** GCC는 `-foptimize-sibling-calls`를 O2부터 켜기 때문이다. Clang은 O1부터 sibcall한다. 실제로 gcc O1 = 기본값이고 clang O1 = 2/3이다.
+- Apple arm64(가변 인자는 항상 스택으로 감)와 Win64(MSVC, MinGW)에서는 꼬리 호출이 없었다. §18.2의 예측과 같다.
+- 결론: Linux x86-64 O2 이상(clang은 O1 이상)에서는 **old의 하드코딩 skip이 모든 C4 사이트에서 맞을 수 없다**(N 줄). new는 모든 경로에서 의도한 프레임에 도달했다.
+
+### 22.2 그 밖의 관찰
+- MinGW O2만 C5와 C7a가 한 프레임 적고(`autoPostInspcector` 인라인), O1과 O3은 기본값이다. GCC의 인라인 결정이 레벨마다 단조롭지 않다는 뜻이다. new는 영향을 받지 않는다.
+- MinGW Os는 C4 전 사이트가 3이다(glutil 내부 한 프레임이 인라인됨). Linux gcc Os도 2/3으로 똑같이 한 칸씩 줄었다.
+- macOS는 표 경로다. `okSkip`이 표 값을 실제 스택에서 측정한 값과 비교하므로, 표 자체가 검증된다.
+
+### 22.3 로그에서 찾은 문제와 조치
+1. **MSVC Rel의 `/Ob1`**: 로그에 `D9025 overriding '/Ob1' with '/Ob3'`(O3)가 찍혔다. RelWithDebInfo의 `/O2 /Ob1`이 각 레벨의 플래그와 함께 cl에 전달됐다는 뜻이다. 따라서 O1과 O2의 인라인 수준은 생성기에 따라 달라질 수 있었다. VS 생성기에서는 `/Ob1`이 남았을 가능성이 높다(미확인).
+   - 조치(`test/stacktrace/CMakeLists.txt`): 이 디렉터리에서만 구성 플래그의 `/O*`와 `/Ob*`를 제거하고, 레벨을 명시했다. O1=`/O1 /Ob1`(MinSizeRel), O2=`/O2 /Ob1`(RelWithDebInfo, gdm 사용자가 실제로 받는 값), O3=`/O2 /Ob3`.
+   - 이 매핑은 VS 생성기에서 이전 결과(§16, §19)가 가졌던 의미와 같을 것으로 본다.
+   - 다음 CI에서 위 D9025 경고가 사라지는지로 확인한다.
+2. **MINGW64 deprecation 경고**(setup-msys2): MSYS2는 UCRT64로 옮기라고 권한다. 하지만 msvcrt 기반 MINGW64가 B9를 잡았으므로 의도적으로 유지하고 `suppress-deprecation-warnings`를 지정했다.
+3. **CI configure 출력**: cpptrace에 실제로 컴파일된 `CPPTRACE_UNWIND_WITH_*` define을 출력한다(`cpptrace unwinder: ...`). 자동 선택이 아닌 백엔드나 설치된 cpptrace도 로그에서 바로 확인할 수 있다.
+4. 무해한 경고:
+   - MSVC `D9025 '/W1' → '/w'`: 의도한 대로 `/w`가 적용된다.
+   - cpptrace `unwind_with_dbghelp.cpp:28 -Wclobbered`: 업스트림 코드에서 나는 경고다.
+
+
+## 23. CI 세 번째 실행 (`logs/`, 커밋 5d78d68, gdm master e6281db)
+- **10/10 작업 통과.** ctest 48/48, `verify_real` 24회 × 34 검사 모두 OK.
+- **S/N 줄이 §22의 값과 모든 작업·레벨에서 같다.** 결과가 재현된다.
+- **MSVC `/Ob` 수정(§22.3-1) 확인.**
+  - `D9025 overriding '/Ob1' with '/Ob3'` 경고가 사라졌다.
+  - O1~O3의 old 정답 skip은 이전과 같다.
+  - 수정 전 VS 생성기에서도 실질적으로 `/Ob1`이었는지, 아니면 인라인 차이가 이 스택에 영향을 주지 않는지는 이 데이터로 구분할 수 없다.
+- **MINGW64 경고 숨김과 언와인더 출력 확인.** deprecation 경고가 없어졌다. `cpptrace unwinder:`는 Linux=UNWIND, macOS=EXECINFO, MSVC·MinGW=DBGHELP로 각 작업의 자동 선택과 일치한다.
+- **이 통과가 gdm의 스킵 로직을 검증한다는 근거:**
+  1. `--verify`는 하나라도 FAIL이면 exit 1이다. 각 트리거에서 측정 API가 한 번도 호출되지 않아도 FAIL이다. ctest가 이 exit 코드로 판정한다.
+  2. `verify_real`은 fetch한 gdm의 **실제** `debug_stacktrace.cpp`를 컴파일해 블랙박스로 검사한다. 검사 대상은 라벨, 로거 출력, 15프레임 깊이, 캐시 일관성이다.
+  3. 하네스 사본의 스킵 판정 함수는 gdm e6281db와 주석을 빼면 동일하다(`isGlutilSource`, `isInternalFrame`, `keepCallerFrames`). `captureDepth`는 매개변수 이름만 다르다. K(4/6)는 configure 때 실제 파일에서 읽는다.
+- **한계:**
+  - GL은 stub이다. 하지만 사용자 호출 위쪽 프레임은 glad DEBUG 래퍼와 glutil뿐이라 드라이버는 스택 모양에 관여하지 않는다.
+  - K에는 여유가 없다(설계). 경로가 하나 더 깊어지면 `--verify`의 `P<=K`가 잡아낸다.
+
+---
+
 ## 12. 부록: 측정 기록 전체 (시간순)
 
 본문 표는 대표 레벨(O0, O2)만 발췌했음. 아래는 모든 측정의 전체 기록이고, 표는 각 결과 폴더의 `summary.md`에서 그대로 옮긴 것임.
